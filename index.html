@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
+  <title>Waqti</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@300;400;500;700;800&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="style.css"/>
+  <!-- PWA -->
+  <link rel="manifest" href="manifest.json"/>
+  <meta name="theme-color" content="#0d1117"/>
+  <meta name="mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+  <meta name="apple-mobile-web-app-title" content="Waqti"/>
+  <link rel="apple-touch-icon" href="icon-192.svg"/>
+</head>
+<body>
+
+<!-- ========== AUTH ========== -->
+<div id="screen-auth" class="screen active">
+  <div class="auth-bg">
+    <div class="auth-blob b1"></div>
+    <div class="auth-blob b2"></div>
+  </div>
+  <div class="auth-card">
+    <div class="logo-wrap">
+      <div class="logo-icon">⏱</div>
+      <h1 class="logo-title">Waqti</h1>
+      <p class="logo-sub">تتبع دوامك وأموالك بسهولة</p>
+    </div>
+    <div class="auth-tabs">
+      <button class="tab-btn active" onclick="switchTab('login')">دخول</button>
+      <button class="tab-btn" onclick="switchTab('register')">حساب جديد</button>
+    </div>
+    <div id="tab-login" class="auth-form active">
+      <div class="input-group">
+        <label>اسم المستخدم</label>
+        <input type="text" id="login-username" placeholder="أدخل اسم المستخدم" autocomplete="username" inputmode="text" enterkeyhint="next" onkeydown="if(event.key==='Enter'||event.key==='Tab'){event.preventDefault();document.getElementById('login-password').focus()}"/>
+      </div>
+      <div class="input-group">
+        <label>كلمة السر</label>
+        <input type="password" id="login-password" placeholder="••••••••" autocomplete="current-password" enterkeyhint="done" onkeydown="if(event.key==='Enter'){handleLogin()}"/>
+      </div>
+      <div id="login-error" class="error-msg hidden"></div>
+      <button class="btn-primary" onclick="handleLogin()">دخول</button>
+    </div>
+    <div id="tab-register" class="auth-form">
+      <div class="input-group">
+        <label>الاسم الكامل</label>
+        <input type="text" id="reg-name" placeholder="مثال: أحمد محمد" enterkeyhint="next" onkeydown="if(event.key==='Enter'||event.key==='Tab'){event.preventDefault();document.getElementById('reg-username').focus()}"/>
+      </div>
+      <div class="input-group">
+        <label>اسم المستخدم</label>
+        <input type="text" id="reg-username" placeholder="يستخدم للدخول" autocomplete="username" enterkeyhint="next" onkeydown="if(event.key==='Enter'||event.key==='Tab'){event.preventDefault();document.getElementById('reg-password').focus()}"/>
+      </div>
+      <div class="input-group">
+        <label>كلمة السر</label>
+        <input type="password" id="reg-password" placeholder="••••••••" autocomplete="new-password" enterkeyhint="done" onkeydown="if(event.key==='Enter'){handleRegister()}"/>
+      </div>
+      <div id="reg-error" class="error-msg hidden"></div>
+      <button class="btn-primary" onclick="handleRegister()">إنشاء الحساب</button>
+    </div>
+  </div>
+</div>
+
+<!-- ========== APP ========== -->
+<div id="screen-app" class="screen">
+
+  <header class="topbar">
+    <div class="topbar-right">
+      <div class="user-avatar" id="user-avatar">أ</div>
+      <div class="user-info">
+        <span class="user-name" id="user-name-display">—</span>
+        <span class="user-date" id="topbar-date">—</span>
+      </div>
+    </div>
+    <div class="topbar-left">
+      <button class="icon-btn" onclick="navigateTo('settings')">⚙️</button>
+      <button class="icon-btn" onclick="handleLogout()">🚪</button>
+    </div>
+  </header>
+
+  <main class="pages">
+
+    <!-- HOME -->
+    <div id="page-home" class="page active">
+
+      <div class="status-bar">
+        <span class="status-badge" id="status-badge">غير مسجل</span>
+        <span class="work-time-live" id="work-time-live"></span>
+      </div>
+
+      <!-- عداد تنازلي -->
+      <div id="countdown-bar" class="countdown-bar hidden">
+        <span class="cd-label">⏳ متبقي على الانصراف</span>
+        <span class="cd-time" id="cd-time">—</span>
+      </div>
+
+      <!-- زر الحضور/الانصراف -->
+      <div class="checkin-wrap">
+        <div class="pulse-ring" id="pulse-ring"></div>
+        <button class="checkin-btn" id="checkin-btn" onclick="toggleAttendance()">
+          <div class="checkin-icon" id="checkin-icon">👆</div>
+          <div class="checkin-label" id="checkin-label">تسجيل حضور</div>
+          <div class="checkin-time" id="checkin-time">اضغط للتسجيل</div>
+        </button>
+      </div>
+
+      <!-- أزرار الإجراءات -->
+      <div id="permission-btn-wrap" class="permission-wrap hidden">
+        <button class="permission-btn" onclick="openPermissionModal()">🚶 إذن خروج</button>
+      </div>
+      <div class="absence-wrap">
+        <button class="absence-btn vacation" onclick="markDay('vacation')">🌴 إجازة</button>
+        <button class="absence-btn absent" onclick="markDay('absent')">❌ غياب</button>
+      </div>
+
+      <!-- ملخص اليوم -->
+      <div class="summary-grid">
+        <div class="summary-card">
+          <div class="sc-icon">🕐</div>
+          <div class="sc-val" id="sum-hours">0.0 س</div>
+          <div class="sc-label">الساعات</div>
+        </div>
+        <div class="summary-card">
+          <div class="sc-icon">💵</div>
+          <div class="sc-val" id="sum-earned">0.0 د</div>
+          <div class="sc-label">المكتسب</div>
+        </div>
+        <div class="summary-card">
+          <div class="sc-icon">📤</div>
+          <div class="sc-val" id="sum-deductions">0.0 د</div>
+          <div class="sc-label">الخصومات</div>
+        </div>
+        <div class="summary-card highlight">
+          <div class="sc-icon">💰</div>
+          <div class="sc-val" id="sum-net">0.0 د</div>
+          <div class="sc-label">الصافي</div>
+        </div>
+      </div>
+
+      <!-- إضافة سريعة -->
+      <div class="section-block">
+        <div class="section-header">
+          <span class="section-title">إضافة سريعة</span>
+        </div>
+        <div class="quick-btns">
+          <button class="quick-btn withdrawal" onclick="openTransactionModal('withdrawal')">
+            💵 مسحوب نقدي
+          </button>
+          <button class="quick-btn purchase" onclick="openTransactionModal('purchase')">
+            📦 بضاعة مأخوذة
+          </button>
+        </div>
+      </div>
+
+      <!-- معاملات اليوم -->
+      <div class="section-block">
+        <div class="section-header">
+          <span class="section-title">معاملات اليوم</span>
+        </div>
+        <div id="today-transactions" class="tx-list">
+          <div class="empty-state">لا توجد معاملات اليوم</div>
+        </div>
+      </div>
+
+      <!-- ملاحظة يومية -->
+      <div class="section-block">
+        <div class="section-header">
+          <span class="section-title">📝 ملاحظة اليوم</span>
+        </div>
+        <textarea id="daily-note" class="daily-note" placeholder="اكتب ملاحظتك هنا..." oninput="saveNote()"></textarea>
+      </div>
+
+    </div><!-- /home -->
+
+    <!-- REPORTS -->
+    <div id="page-reports" class="page">
+      <div class="page-header"><h2>التقارير</h2></div>
+
+      <div class="month-selector">
+        <button class="arrow-btn" onclick="changeMonth(-1)">›</button>
+        <span id="report-month-label">—</span>
+        <button class="arrow-btn" onclick="changeMonth(1)">‹</button>
+      </div>
+
+      <div class="report-summary">
+        <div class="report-card rc-green">
+          <div class="rc-label">إجمالي الراتب</div>
+          <div class="rc-val" id="rep-salary">0 د</div>
+        </div>
+        <div class="report-card rc-red">
+          <div class="rc-label">إجمالي الخصومات</div>
+          <div class="rc-val" id="rep-deductions">0 د</div>
+        </div>
+        <div class="report-card rc-blue">
+          <div class="rc-label">صافي المستحق</div>
+          <div class="rc-val" id="rep-net">0 د</div>
+        </div>
+        <div class="report-card rc-gold">
+          <div class="rc-label">أيام العمل</div>
+          <div class="rc-val" id="rep-days">0 يوم</div>
+        </div>
+      </div>
+
+      <div class="section-block">
+        <div class="section-header"><span class="section-title">تفاصيل الأيام</span></div>
+        <div id="report-days-list" class="report-list">
+          <div class="empty-state">لا توجد بيانات</div>
+        </div>
+      </div>
+
+      <div class="section-block">
+        <div class="section-header"><span class="section-title">المسحوبات والمشتريات</span></div>
+        <div id="report-tx-list" class="report-list">
+          <div class="empty-state">لا توجد معاملات</div>
+        </div>
+      </div>
+
+      <!-- رسم بياني -->
+      <div class="section-block">
+        <div class="section-header"><span class="section-title">📈 الساعات اليومية</span></div>
+        <div class="chart-wrap">
+          <canvas id="hours-chart"></canvas>
+        </div>
+      </div>
+
+      <!-- تقويم شهري -->
+      <div class="section-block">
+        <div class="section-header"><span class="section-title">📅 تقويم الشهر</span></div>
+        <div id="month-calendar" class="month-calendar"></div>
+      </div>
+
+      <div class="report-actions">
+        <button class="btn-pdf" onclick="exportPDF()">📄 PDF</button>
+        <button class="btn-share" onclick="shareReport()">📤 مشاركة</button>
+      </div>
+    </div><!-- /reports -->
+
+    <!-- SETTINGS -->
+    <div id="page-settings" class="page">
+      <div class="page-header"><h2>الإعدادات</h2></div>
+      <div class="settings-sections">
+
+        <div class="settings-card">
+          <h3 class="settings-card-title">💰 نظام الراتب</h3>
+          <div class="input-group">
+            <label>نوع الاحتساب</label>
+            <select id="salary-type" onchange="toggleSalaryFields()">
+              <option value="hourly">بالساعة</option>
+              <option value="daily">يومي ثابت</option>
+            </select>
+          </div>
+          <div id="hourly-field" class="input-group">
+            <label>قيمة الساعة (دينار)</label>
+            <input type="number" id="hourly-rate" placeholder="مثال: 5" min="0" step="0.5" inputmode="decimal"/>
+          </div>
+          <div id="auto-calc-wrap" class="auto-calc-box">
+            <div class="auto-calc-title">🧮 احسب قيمة الساعة تلقائياً</div>
+            <div class="input-row">
+              <div class="input-group">
+                <label>الراتب الأساسي (د)</label>
+                <input type="number" id="base-salary" placeholder="1500" min="0" oninput="calcHourlyRate()" inputmode="decimal"/>
+              </div>
+              <div class="input-group">
+                <label>ساعات/يوم</label>
+                <input type="number" id="work-hours-day" placeholder="8" min="1" max="24" oninput="calcHourlyRate()" inputmode="decimal"/>
+              </div>
+            </div>
+            <div class="input-group">
+              <label>أيام العمل في الشهر</label>
+              <input type="number" id="work-days-month" placeholder="26" min="1" max="31" oninput="calcHourlyRate()" inputmode="decimal"/>
+            </div>
+            <div id="calc-result" class="calc-result hidden"></div>
+            <button class="btn-apply" onclick="applyCalcRate()">✅ تطبيق القيمة المحسوبة</button>
+          </div>
+          <div id="daily-field" class="input-group hidden">
+            <label>الراتب اليومي (دينار)</label>
+            <input type="number" id="daily-rate" placeholder="مثال: 50" min="0" inputmode="decimal"/>
+          </div>
+        </div>
+
+        <div class="settings-card">
+          <h3 class="settings-card-title">🕐 ساعات الدوام</h3>
+          <div class="input-row">
+            <div class="input-group">
+              <label>وقت الحضور</label>
+              <input type="time" id="work-start" value="08:00"/>
+            </div>
+            <div class="input-group">
+              <label>وقت الانصراف</label>
+              <input type="time" id="work-end" value="17:00"/>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-card">
+          <h3 class="settings-card-title">👤 الحساب</h3>
+          <div class="input-group">
+            <label>الاسم الكامل</label>
+            <input type="text" id="settings-name"/>
+          </div>
+          <div class="input-group">
+            <label>كلمة سر جديدة (اتركها فارغة للإبقاء)</label>
+            <input type="password" id="settings-password" placeholder="••••••••"/>
+          </div>
+        </div>
+
+        <!-- Backup & Restore -->
+        <div class="settings-card">
+          <h3 class="settings-card-title">💾 نسخ احتياطي</h3>
+          <p class="install-hint">صدّر بياناتك كملف أو استردّها من ملف سابق</p>
+          <div class="backup-btns">
+            <button class="btn-backup export" onclick="exportBackup()">⬆️ تصدير</button>
+            <button class="btn-backup import" onclick="document.getElementById('import-file').click()">⬇️ استيراد</button>
+          </div>
+          <input type="file" id="import-file" accept=".json" style="display:none" onchange="importBackup(event)"/>
+        </div>
+
+        <!-- Light / Dark Mode -->
+        <div class="settings-card">
+          <h3 class="settings-card-title">🎨 المظهر</h3>
+          <div class="theme-toggle-wrap">
+            <span class="theme-label" id="theme-label">🌙 داكن</span>
+            <button class="theme-toggle" id="theme-toggle-btn" onclick="toggleTheme()">
+              <div class="theme-knob" id="theme-knob"></div>
+            </button>
+          </div>
+        </div>
+
+        <!-- Install PWA -->
+        <div class="settings-card" id="install-card" style="display:none">
+          <h3 class="settings-card-title">📲 تثبيت التطبيق</h3>
+          <p class="install-hint">ثبّت Waqti على شاشتك الرئيسية للوصول السريع بدون متصفح</p>
+          <button class="btn-install" onclick="installPWA()">📲 تثبيت على الهاتف</button>
+        </div>
+
+        <!-- Danger Zone -->
+        <div class="settings-card danger-card">
+          <h3 class="settings-card-title">⚠️ منطقة الخطر</h3>
+          <p class="danger-hint">مسح كامل لسجل الحضور والمعاملات — لا يمكن التراجع</p>
+          <button class="btn-danger" onclick="confirmClearData()">🗑️ مسح جميع البيانات</button>
+        </div>
+
+        <button class="btn-primary" onclick="saveSettings()">💾 حفظ الإعدادات</button>
+        <div id="settings-success" class="success-msg hidden">✅ تم الحفظ بنجاح</div>
+      </div>
+    </div><!-- /settings -->
+
+  </main>
+
+  <nav class="bottom-nav">
+    <button class="nav-btn active" onclick="navigateTo('home')" id="nav-home">
+      <span class="nav-icon">🏠</span>
+      <span class="nav-label">الرئيسية</span>
+    </button>
+    <button class="nav-btn" onclick="navigateTo('reports')" id="nav-reports">
+      <span class="nav-icon">📊</span>
+      <span class="nav-label">التقارير</span>
+    </button>
+    <button class="nav-btn" onclick="navigateTo('settings')" id="nav-settings">
+      <span class="nav-icon">⚙️</span>
+      <span class="nav-label">الإعدادات</span>
+    </button>
+  </nav>
+
+</div><!-- /screen-app -->
+
+<!-- CONFIRM MODAL -->
+<div id="modal-confirm" class="modal-overlay hidden">
+  <div class="modal-card confirm-card">
+    <div class="confirm-icon" id="confirm-icon">👆</div>
+    <h3 id="confirm-title">تأكيد</h3>
+    <p id="confirm-msg" class="confirm-msg"></p>
+    <div class="confirm-btns">
+      <button class="btn-confirm-yes" id="confirm-yes-btn">نعم</button>
+      <button class="btn-confirm-no" onclick="closeConfirm()">لا</button>
+    </div>
+  </div>
+</div>
+
+<!-- PERMISSION MODAL -->
+<div id="modal-permission" class="modal-overlay hidden" onclick="closePermModal(event)">
+  <div class="modal-card">
+    <div class="modal-header">
+      <h3>🚶 إذن خروج</h3>
+      <button class="close-btn" onclick="closePermissionModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="input-group">
+        <label>سبب الخروج</label>
+        <input type="text" id="perm-reason" placeholder="مثال: مشوار، موعد طبي..."/>
+      </div>
+      <div class="input-group">
+        <label>هل يُخصم الوقت من راتبك؟</label>
+        <div class="perm-deduct-btns">
+          <button class="perm-deduct-btn" id="deduct-yes" onclick="setDeduct(true)">نعم — يُخصم</button>
+          <button class="perm-deduct-btn active-no" id="deduct-no" onclick="setDeduct(false)">لا — لا يُخصم</button>
+        </div>
+      </div>
+      <div id="perm-error" class="error-msg hidden"></div>
+      <button class="btn-primary" onclick="savePermission()">تسجيل الإذن</button>
+    </div>
+  </div>
+</div>
+
+<!-- TRANSACTION MODAL -->
+<div id="modal-transaction" class="modal-overlay hidden" onclick="closeModal(event)">
+  <div class="modal-card">
+    <div class="modal-header">
+      <h3 id="modal-title">إضافة معاملة</h3>
+      <button class="close-btn" onclick="closeTransactionModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="input-group">
+        <label>الوصف</label>
+        <input type="text" id="tx-desc" placeholder="مثال: سلفة، بضاعة سجائر..."/>
+      </div>
+      <div class="input-group">
+        <label>المبلغ (دينار)</label>
+        <input type="number" id="tx-amount" placeholder="0.00" min="0" step="0.5" inputmode="decimal"/>
+      </div>
+      <div id="tx-error" class="error-msg hidden"></div>
+      <button class="btn-primary" onclick="saveTransaction()">إضافة</button>
+    </div>
+  </div>
+</div>
+
+<!-- ABSENCE MODAL -->
+<div id="modal-absence" class="modal-overlay hidden" onclick="closeAbsenceModal(event)">
+  <div class="modal-card">
+    <div class="modal-header">
+      <h3 id="absence-modal-title">تسجيل غياب</h3>
+      <button class="close-btn" onclick="closeAbsenceModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="input-group">
+        <label>السبب (اختياري)</label>
+        <input type="text" id="absence-reason" placeholder="مثال: مرض، ظروف خاصة..."/>
+      </div>
+      <div id="absence-error" class="error-msg hidden"></div>
+      <button class="btn-primary" id="absence-confirm-btn" onclick="saveAbsence()">تسجيل</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
