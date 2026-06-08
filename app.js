@@ -720,8 +720,8 @@ function confirmClearData() {
             readyForNewDay = false;
             saveData();
             clearStep = 0;
-            navigateTo('home');
-            showToast('🗑️ تم مسح جميع البيانات');
+            showToast('🗑️ تم مسح البيانات — جاري الإعادة...');
+setTimeout(() => location.reload(), 800);
           }
         );
       }, 300);
