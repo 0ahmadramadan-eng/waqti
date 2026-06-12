@@ -1,5 +1,5 @@
 /* Waqti — Service Worker */
-const CACHE = 'waqti-v3';
+const CACHE = 'waqti-v4';
 const FILES = [
   './index.html',
   './style.css',
