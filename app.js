@@ -1,5 +1,5 @@
 /* =============================================
-   Waqti — app.js  (Final)
+   Waqti — app.js  (Multi-Session)
    ============================================= */
 
 // ===== DATA =====
@@ -14,27 +14,76 @@ const DB = {
   defaultData:     (name) => ({
     name,
     settings: { salaryType:'hourly', hourlyRate:5, dailyRate:50, workStart:'08:00', workEnd:'17:00' },
+    // attendance: { 'YYYY-MM-DD': { sessions:[{in,out},...] } }
     attendance:   {},
     transactions: [],
-    notes:        {},   // 'YYYY-MM-DD': 'text'
-    absences:     {}    // 'YYYY-MM-DD': { type:'vacation'|'absent', reason }
+    notes:        {},
+    absences:     {}
   })
 };
 
-// ===== STATE =====
-let currentUser  = null;
-let userData     = null;
-let currentTxType = null;
-let reportDate   = new Date();
-let permDeduct   = false;
-let calcedRate   = 0;
-let liveTimer      = null;
-let countdownTimer = null;
-let deferredInstall = null;
-let readyForNewDay  = false;
-let currentAbsenceType = null; // true بعد الانصراف مباشرة
+// ===== HELPERS: Sessions =====
+// يرجع الجلسة المفتوحة الحالية (in بدون out) أو null
+function getOpenSession(dateStr) {
+  const day = userData.attendance[dateStr];
+  if (!day?.sessions) return null;
+  return day.sessions.find(s => s.in && !s.out) || null;
+}
 
-// ===== PWA INSTALL =====
+// يرجع مجموع الساعات لكل جلسات اليوم
+function getTotalHours(dateStr) {
+  const day = userData.attendance[dateStr];
+  if (!day?.sessions?.length) return 0;
+  const now = getCurrentTimeStr();
+  return day.sessions.reduce((total, s) => {
+    if (!s.in) return total;
+    const end = s.out || now; // الجلسة المفتوحة تحسب لحد الآن
+    return total + calcHours(s.in, end);
+  }, 0);
+}
+
+// يرجع أول وقت حضور اليوم
+function getFirstIn(dateStr) {
+  const day = userData.attendance[dateStr];
+  return day?.sessions?.[0]?.in || null;
+}
+
+// يرجع آخر وقت انصراف
+function getLastOut(dateStr) {
+  const day = userData.attendance[dateStr];
+  if (!day?.sessions?.length) return null;
+  const outs = day.sessions.filter(s => s.out).map(s => s.out);
+  return outs.length ? outs[outs.length - 1] : null;
+}
+
+// migrate البيانات القديمة { in, out } للنظام الجديد
+function migrateAttendance() {
+  let changed = false;
+  Object.keys(userData.attendance).forEach(dateStr => {
+    const day = userData.attendance[dateStr];
+    if (day && !day.sessions) {
+      userData.attendance[dateStr] = {
+        sessions: [{ in: day.in || null, out: day.out || null }]
+      };
+      changed = true;
+    }
+  });
+  if (changed) saveData();
+}
+
+// ===== STATE =====
+let currentUser     = null;
+let userData        = null;
+let currentTxType   = null;
+let reportDate      = new Date();
+let permDeduct      = false;
+let calcedRate      = 0;
+let liveTimer       = null;
+let countdownTimer  = null;
+let deferredInstall = null;
+let currentAbsenceType = null;
+
+// ===== PWA =====
 window.addEventListener('beforeinstallprompt', (e) => {
   e.preventDefault();
   deferredInstall = e;
@@ -53,7 +102,6 @@ async function installPWA() {
   }
 }
 
-// Service Worker
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('./sw.js').catch(() => {});
 }
@@ -76,8 +124,12 @@ function navigateTo(page) {
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
   document.getElementById(`page-${page}`)?.classList.add('active');
   document.getElementById(`nav-${page}`)?.classList.add('active');
-  if (page === 'home')     refreshHome();
-  if (page === 'reports')  { refreshReports(); const ms2=`${reportDate.getFullYear()}-${String(reportDate.getMonth()+1).padStart(2,'0')}`; setTimeout(()=>{ renderChart(ms2); renderCalendar(ms2); },50); }
+  if (page === 'home')    refreshHome();
+  if (page === 'reports') {
+    refreshReports();
+    const ms = `${reportDate.getFullYear()}-${String(reportDate.getMonth()+1).padStart(2,'0')}`;
+    setTimeout(() => { renderChart(ms); renderCalendar(ms); }, 50);
+  }
   if (page === 'settings') loadSettings();
 }
 
@@ -124,6 +176,7 @@ function loginUser(username) {
   userData    = DB.getUserData(username) || DB.defaultData(username);
   DB.saveUserData(username, userData);
   DB.setCurrentUser(username);
+  migrateAttendance(); // تحويل البيانات القديمة إن وجدت
   const initial = (userData.name || username).charAt(0).toUpperCase();
   document.getElementById('user-avatar').textContent       = initial;
   document.getElementById('user-name-display').textContent = userData.name || username;
@@ -159,15 +212,14 @@ function startLiveTimer() {
   stopLiveTimer();
   liveTimer = setInterval(() => {
     const today = getTodayStr();
-    const att   = userData?.attendance[today];
-    if (att?.in && !att?.out) {
-      const hrs = calcHoursUntilNow(att.in);
+    if (getOpenSession(today)) {
+      const hrs = getTotalHours(today);
       document.getElementById('work-time-live').textContent = formatLiveTime(hrs);
       refreshSummary(today);
     } else {
       stopLiveTimer();
     }
-  }, 30000); // كل 30 ثانية
+  }, 30000);
 }
 
 function stopLiveTimer() {
@@ -186,9 +238,9 @@ function formatLiveTime(hrs) {
 // ===== HOME =====
 function refreshHome() {
   const today      = getTodayStr();
-  // لو readyForNewDay — نشوف الجلسة الجديدة
-  const sessionKey = readyForNewDay ? today + '_2' : today;
-  const att        = userData.attendance[sessionKey] || userData.attendance[today];
+  const openSess   = getOpenSession(today);
+  const day        = userData.attendance[today];
+  const hasSessions = day?.sessions?.length > 0;
 
   const btn      = document.getElementById('checkin-btn');
   const icon     = document.getElementById('checkin-icon');
@@ -206,72 +258,65 @@ function refreshHome() {
   liveEl.textContent = '';
   stopLiveTimer();
 
-  if (!att?.in) {
+  if (!hasSessions) {
+    // لم يُسجَّل حضور بعد
     icon.textContent   = '👆';
     label.textContent  = 'تسجيل حضور';
     timeEl.textContent = 'اضغط للتسجيل';
     badge.textContent  = 'غير مسجل';
-  } else if (att.in && !att.out) {
+  } else if (openSess) {
+    // جلسة مفتوحة — حاضر
     btn.classList.add('checked-in');
     pulse.classList.add('active');
     icon.textContent   = '🚪';
     label.textContent  = 'تسجيل انصراف';
-    timeEl.textContent = 'حضور: ' + att.in;
-    badge.textContent  = '🟢 حاضر منذ ' + att.in;
+    timeEl.textContent = 'حضور: ' + openSess.in;
+    badge.textContent  = '🟢 حاضر منذ ' + openSess.in;
     badge.classList.add('in');
     permWrap.classList.remove('hidden');
-    liveEl.textContent = formatLiveTime(calcHoursUntilNow(att.in));
+    const hrs = getTotalHours(today);
+    liveEl.textContent = formatLiveTime(hrs);
     startLiveTimer();
     startCountdown();
-  } else if (att.in && att.out) {
-    btn.classList.add('done');
-    icon.textContent   = '✅';
-    label.textContent  = 'انتهى الدوام';
-    timeEl.textContent = att.in + ' — ' + att.out;
-    badge.textContent  = '✔ انصرف ' + att.out;
-    badge.classList.add('out');
-    stopCountdown();
+  } else {
+    // كل الجلسات مغلقة — انصرف
+    const sessCount = day.sessions.length;
+    btn.classList.add('checked-in'); // يسمح بجلسة جديدة
+    icon.textContent   = '👆';
+    label.textContent  = 'بصمة جديدة';
+    const lastOut = getLastOut(today);
+    timeEl.textContent = `${sessCount} جلسة | آخر خروج: ${lastOut}`;
+    badge.textContent  = `✔ ${sessCount} جلسة اليوم`;
+    badge.classList.add('in');
   }
 
-  refreshSummary(sessionKey);
+  refreshSummary(today);
   renderTodayTransactions(today);
   loadDailyNote(today);
   refreshAbsenceButtons(today);
 }
 
+// ===== TOGGLE ATTENDANCE (Multi-Session) =====
 function toggleAttendance() {
-  // دايماً تاريخ الهاتف — اليوم الجديد يبدأ فور تغيّر التاريخ بعد الانصراف
-  const today = getTodayStr();
-  const att   = userData.attendance[today] || {};
+  const today    = getTodayStr();
+  const openSess = getOpenSession(today);
 
-  // لو انصرف وأراد حضور جديد قبل منتصف الليل — نستخدم timestamp فريد
-  const sessionKey = (readyForNewDay && att?.out) ? today + '_2' : today;
-  const sessionAtt = userData.attendance[sessionKey] || {};
-
-  if (!sessionAtt.in) {
+  if (!openSess) {
+    // تسجيل حضور — جلسة جديدة
     showConfirm('👆', 'تسجيل الحضور', 'هل تريد تسجيل حضورك الآن؟', () => {
-      if (!userData.attendance[sessionKey]) userData.attendance[sessionKey] = {};
-      userData.attendance[sessionKey].in = getCurrentTimeStr();
-      readyForNewDay = false;
+      if (!userData.attendance[today]) userData.attendance[today] = { sessions: [] };
+      if (!userData.attendance[today].sessions) userData.attendance[today].sessions = [];
+      userData.attendance[today].sessions.push({ in: getCurrentTimeStr(), out: null });
       saveData(); refreshHome();
-      showToast('✅ تم تسجيل الحضور ' + userData.attendance[sessionKey].in);
+      showToast('✅ تم تسجيل الحضور ' + getCurrentTimeStr());
     });
-    return;
-  }
-
-  if (att.in && !att.out) {
+  } else {
+    // تسجيل انصراف — أغلق الجلسة المفتوحة
     showConfirm('🚪', 'تسجيل الانصراف', 'هل تريد تسجيل انصرافك الآن؟', () => {
-      userData.attendance[today].out = getCurrentTimeStr();
-      readyForNewDay = true; // فعّل إمكانية الحضور مباشرة
+      openSess.out = getCurrentTimeStr();
       saveData(); refreshHome();
-      showToast('👋 تم تسجيل الانصراف ' + userData.attendance[today].out);
+      showToast('👋 تم تسجيل الانصراف ' + openSess.out);
     });
-    return;
-  }
-
-  // دوام اليوم مكتمل وما زال نفس اليوم — ينتظر اليوم الجديد
-  if (att.in && att.out) {
-    showToast('✅ دوام اليوم مسجل — سيتجدد مع اليوم الجديد');
   }
 }
 
@@ -296,7 +341,7 @@ function savePermission() {
   const errEl  = document.getElementById('perm-error');
   if (!reason) { showError(errEl, 'أدخل سبب الخروج'); return; }
   const today = getTodayStr();
-  if (!userData.attendance[today]?.in) { showError(errEl, 'لم يُسجَّل الحضور بعد'); return; }
+  if (!getOpenSession(today)) { showError(errEl, 'لم يُسجَّل الحضور بعد'); return; }
   userData.transactions.push({
     id: Date.now(), date: today, time: getCurrentTimeStr(),
     type: 'permission',
@@ -323,7 +368,7 @@ function saveTransaction() {
   const desc   = document.getElementById('tx-desc').value.trim();
   const amount = parseFloat(document.getElementById('tx-amount').value);
   const errEl  = document.getElementById('tx-error');
-  if (!desc)              { showError(errEl, 'أدخل وصف المعاملة'); return; }
+  if (!desc)               { showError(errEl, 'أدخل وصف المعاملة'); return; }
   if (!amount || amount<=0){ showError(errEl, 'أدخل مبلغ صحيح'); return; }
   userData.transactions.push({
     id: Date.now(), date: getTodayStr(), time: getCurrentTimeStr(),
@@ -335,16 +380,13 @@ function saveTransaction() {
 
 // ===== SUMMARY =====
 function refreshSummary(dateStr) {
-  const att = userData.attendance[dateStr];
-  const s   = userData.settings;
-  let earned = 0, hours = 0;
-  if (att?.in) {
-    const end = att.out || getCurrentTimeStr();
-    hours  = calcHours(att.in, end);
-    earned = s.salaryType === 'hourly' ? hours * (s.hourlyRate||0) : (att.out ? (s.dailyRate||0) : 0);
-  }
+  const s     = userData.settings;
+  const hours = getTotalHours(dateStr);
+  const earned = hours > 0
+    ? (s.salaryType === 'hourly' ? hours * (s.hourlyRate||0) : (s.dailyRate||0))
+    : 0;
   const txs  = userData.transactions.filter(t => t.date === dateStr && t.amount > 0);
-  const deds = txs.reduce((s,t) => s + t.amount, 0);
+  const deds = txs.reduce((sum,t) => sum + t.amount, 0);
   document.getElementById('sum-hours').textContent      = hours.toFixed(1) + ' س';
   document.getElementById('sum-earned').textContent     = earned.toFixed(1) + ' د';
   document.getElementById('sum-deductions').textContent = deds.toFixed(1) + ' د';
@@ -353,9 +395,24 @@ function refreshSummary(dateStr) {
 
 function renderTodayTransactions(dateStr) {
   const list = document.getElementById('today-transactions');
-  const txs  = userData.transactions.filter(t => t.date === dateStr).reverse();
-  if (!txs.length) { list.innerHTML = '<div class="empty-state">لا توجد معاملات اليوم</div>'; return; }
-  list.innerHTML = txs.map(t => {
+  const day  = userData.attendance[dateStr];
+  const sessions = day?.sessions || [];
+
+  // عرض الجلسات
+  let sessHtml = '';
+  if (sessions.length > 0) {
+    sessHtml = sessions.map((s, i) => `
+      <div class="tx-item permission">
+        <div class="tx-info">
+          <div class="tx-desc">⏱ جلسة ${i+1}</div>
+          <div class="tx-meta">${s.in} — ${s.out || 'مفتوحة'}</div>
+        </div>
+        <div class="tx-amount" style="color:var(--accent)">${calcHours(s.in, s.out||getCurrentTimeStr()).toFixed(1)} س</div>
+      </div>`).join('');
+  }
+
+  const txs = userData.transactions.filter(t => t.date === dateStr).reverse();
+  const txHtml = txs.map(t => {
     const icon = t.type==='withdrawal'?'💵':t.type==='purchase'?'📦':'🚶';
     const amt  = t.amount > 0 ? `- ${t.amount.toFixed(1)} د` : '—';
     return `<div class="tx-item ${t.type}">
@@ -366,10 +423,17 @@ function renderTodayTransactions(dateStr) {
       <div class="tx-amount">${amt}</div>
     </div>`;
   }).join('');
+
+  list.innerHTML = sessHtml + txHtml || '<div class="empty-state">لا توجد معاملات اليوم</div>';
 }
 
 // ===== REPORTS =====
-function changeMonth(dir) { reportDate.setMonth(reportDate.getMonth()+dir); refreshReports(); const ms2=`${reportDate.getFullYear()}-${String(reportDate.getMonth()+1).padStart(2,'0')}`; setTimeout(()=>{ renderChart(ms2); renderCalendar(ms2); },50); }
+function changeMonth(dir) {
+  reportDate.setMonth(reportDate.getMonth()+dir);
+  refreshReports();
+  const ms = `${reportDate.getFullYear()}-${String(reportDate.getMonth()+1).padStart(2,'0')}`;
+  setTimeout(() => { renderChart(ms); renderCalendar(ms); }, 50);
+}
 
 function refreshReports() {
   const y = reportDate.getFullYear(), m = reportDate.getMonth();
@@ -381,18 +445,17 @@ function refreshReports() {
   const rows = [];
 
   Object.keys(userData.attendance).filter(d=>d.startsWith(ms)).sort().forEach(dateStr => {
-    const att = userData.attendance[dateStr];
-    if (!att?.in) return;
-    let earned=0, hours=0;
-    if (att.out) {
-      hours  = calcHours(att.in, att.out);
-      earned = s.salaryType==='hourly' ? hours*(s.hourlyRate||0) : (s.dailyRate||0);
-      days++;
-    }
+    const hours = getTotalHours(dateStr);
+    if (hours <= 0) return;
+    const earned = s.salaryType==='hourly' ? hours*(s.hourlyRate||0) : (s.dailyRate||0);
     const dayTx  = userData.transactions.filter(t=>t.date===dateStr&&t.amount>0);
-    const dayDed = dayTx.reduce((s,t)=>s+t.amount,0);
-    totalE+=earned; totalD+=dayDed;
-    rows.push({dateStr,att,hours,earned,dayDed});
+    const dayDed = dayTx.reduce((sum,t)=>sum+t.amount, 0);
+    const day    = userData.attendance[dateStr];
+    const firstIn  = getFirstIn(dateStr);
+    const lastOut  = getLastOut(dateStr);
+    const sessCount = day?.sessions?.length || 0;
+    totalE+=earned; totalD+=dayDed; days++;
+    rows.push({dateStr, hours, earned, dayDed, firstIn, lastOut, sessCount});
   });
 
   document.getElementById('rep-salary').textContent     = totalE.toFixed(1)+' د';
@@ -405,7 +468,7 @@ function refreshReports() {
     <div class="report-day-item">
       <div class="rdi-left">
         <div class="rdi-date">${formatDateShort(r.dateStr)}</div>
-        <div class="rdi-hours">⏱ ${r.hours.toFixed(1)}س | ${r.att.in} — ${r.att.out||'لم يُسجَّل'}</div>
+        <div class="rdi-hours">⏱ ${r.hours.toFixed(1)}س | ${r.firstIn||'—'} — ${r.lastOut||'مفتوح'} ${r.sessCount>1?`(${r.sessCount} جلسات)`:''}</div>
       </div>
       <div class="rdi-right">
         <div class="rdi-earned">+${r.earned.toFixed(1)} د</div>
@@ -439,14 +502,14 @@ function exportPDF() {
   const rows=[];
 
   Object.keys(userData.attendance).filter(d=>d.startsWith(ms)).sort().forEach(dateStr=>{
-    const att=userData.attendance[dateStr];
-    if(!att?.in||!att?.out) return;
-    const hours=calcHours(att.in,att.out);
+    const hours = getTotalHours(dateStr);
+    if(hours <= 0) return;
     const earned=s.salaryType==='hourly'?hours*(s.hourlyRate||0):(s.dailyRate||0);
     const dayTx=userData.transactions.filter(t=>t.date===dateStr&&t.amount>0);
-    const dayDed=dayTx.reduce((s,t)=>s+t.amount,0);
+    const dayDed=dayTx.reduce((sum,t)=>sum+t.amount,0);
+    const firstIn=getFirstIn(dateStr), lastOut=getLastOut(dateStr);
     totalE+=earned; totalD+=dayDed; days++;
-    rows.push({dateStr,att,hours,earned,dayDed});
+    rows.push({dateStr,hours,earned,dayDed,firstIn,lastOut});
   });
 
   const txs=userData.transactions.filter(t=>t.date.startsWith(ms)&&t.amount>0);
@@ -454,8 +517,7 @@ function exportPDF() {
 
   const html=`<!DOCTYPE html>
 <html lang="ar" dir="rtl">
-<head>
-<meta charset="UTF-8"/>
+<head><meta charset="UTF-8"/>
 <title>تقرير Waqti — ${label}</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Tajawal:wght@400;700;800&display=swap');
@@ -465,23 +527,19 @@ function exportPDF() {
   .hdr h1{font-size:1.8rem;color:#00C896} .hdr p{color:#666;margin-top:.3rem;font-size:.9rem}
   .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-bottom:2rem}
   .card{border-radius:10px;padding:1rem;text-align:center}
-  .card.g{background:#e8faf5;border:1px solid #00C896} .card.r{background:#fff0f1;border:1px solid #ff5c6a}
-  .card.b{background:#eef4ff;border:1px solid #4a90e2} .card.o{background:#fffbe6;border:1px solid #f5c842}
-  .card .v{font-size:1.3rem;font-weight:800;margin-top:.3rem}
-  .card .l{font-size:.75rem;color:#666}
-  .card.g .v{color:#00C896} .card.r .v{color:#ff5c6a} .card.b .v{color:#4a90e2} .card.o .v{color:#b8950a}
+  .card.g{background:#e8faf5;border:1px solid #00C896}.card.r{background:#fff0f1;border:1px solid #ff5c6a}
+  .card.b{background:#eef4ff;border:1px solid #4a90e2}.card.o{background:#fffbe6;border:1px solid #f5c842}
+  .card .v{font-size:1.3rem;font-weight:800;margin-top:.3rem}.card .l{font-size:.75rem;color:#666}
+  .card.g .v{color:#00C896}.card.r .v{color:#ff5c6a}.card.b .v{color:#4a90e2}.card.o .v{color:#b8950a}
   h2{font-size:1rem;font-weight:700;margin:1.5rem 0 .75rem;border-right:4px solid #00C896;padding-right:.5rem}
   table{width:100%;border-collapse:collapse;font-size:.85rem}
   th{background:#00C896;color:#000;padding:.55rem .75rem;text-align:right;font-weight:700}
   td{padding:.5rem .75rem;border-bottom:1px solid #eee}
   tr:nth-child(even) td{background:#f9f9f9}
-  .ded{color:#ff5c6a;font-weight:700}
-  .net{color:#00C896;font-weight:800}
+  .ded{color:#ff5c6a;font-weight:700}.net{color:#00C896;font-weight:800}
   .ftr{text-align:center;margin-top:2rem;font-size:.75rem;color:#aaa;border-top:1px solid #eee;padding-top:1rem}
   @media print{body{padding:1rem}}
-</style>
-</head>
-<body>
+</style></head><body>
 <div class="hdr">
   <h1>⏱ Waqti — تقرير ${label}</h1>
   <p>${userData.name||currentUser} | طُبع: ${new Date().toLocaleDateString('ar-LY')}</p>
@@ -494,24 +552,21 @@ function exportPDF() {
 </div>
 <h2>تفاصيل أيام العمل</h2>
 <table>
-  <thead><tr><th>التاريخ</th><th>الحضور</th><th>الانصراف</th><th>الساعات</th><th>المكتسب</th><th>الخصومات</th><th>الصافي</th></tr></thead>
+  <thead><tr><th>التاريخ</th><th>أول حضور</th><th>آخر انصراف</th><th>الساعات</th><th>المكتسب</th><th>الخصومات</th><th>الصافي</th></tr></thead>
   <tbody>${rows.map(r=>`<tr>
-    <td>${formatDateShort(r.dateStr)}</td><td>${r.att.in}</td><td>${r.att.out}</td>
+    <td>${formatDateShort(r.dateStr)}</td><td>${r.firstIn||'—'}</td><td>${r.lastOut||'مفتوح'}</td>
     <td>${r.hours.toFixed(1)}</td><td>${r.earned.toFixed(1)} د</td>
     <td class="ded">${r.dayDed>0?r.dayDed.toFixed(1)+' د':'—'}</td>
     <td class="net">${(r.earned-r.dayDed).toFixed(1)} د</td>
   </tr>`).join('')}</tbody>
 </table>
-${txs.length?`
-<h2>المسحوبات والمشتريات</h2>
-<table>
-  <thead><tr><th>التاريخ</th><th>النوع</th><th>الوصف</th><th>المبلغ</th></tr></thead>
-  <tbody>${txs.map(t=>`<tr>
-    <td>${formatDateShort(t.date)}</td>
-    <td>${t.type==='withdrawal'?'مسحوب نقدي':t.type==='purchase'?'بضاعة':'إذن خروج'}</td>
-    <td>${t.desc}</td><td class="ded">${t.amount.toFixed(1)} د</td>
-  </tr>`).join('')}</tbody>
-</table>`:''}
+${txs.length?`<h2>المسحوبات والمشتريات</h2>
+<table><thead><tr><th>التاريخ</th><th>النوع</th><th>الوصف</th><th>المبلغ</th></tr></thead>
+<tbody>${txs.map(t=>`<tr>
+  <td>${formatDateShort(t.date)}</td>
+  <td>${t.type==='withdrawal'?'مسحوب نقدي':t.type==='purchase'?'بضاعة':'إذن خروج'}</td>
+  <td>${t.desc}</td><td class="ded">${t.amount.toFixed(1)} د</td>
+</tr>`).join('')}</tbody></table>`:''}
 <div class="ftr">تم إنشاء هذا التقرير بواسطة Waqti</div>
 </body></html>`;
 
@@ -580,8 +635,6 @@ function saveSettings() {
   showToast('✅ تم حفظ الإعدادات');
 }
 
-
-
 // ===== COUNTDOWN =====
 function startCountdown() {
   stopCountdown();
@@ -600,17 +653,11 @@ function updateCountdown() {
   const bar = document.getElementById('countdown-bar');
   const cdT = document.getElementById('cd-time');
   if (!s?.workEnd || !bar || !cdT) return;
-
   const now     = new Date();
   const [eh,em] = s.workEnd.split(':').map(Number);
   const end     = new Date(); end.setHours(eh, em, 0, 0);
   const diffMs  = end - now;
-
-  if (diffMs <= 0) {
-    bar.classList.add('hidden');
-    return;
-  }
-
+  if (diffMs <= 0) { bar.classList.add('hidden'); return; }
   bar.classList.remove('hidden');
   const totalMins = Math.floor(diffMs / 60000);
   const h = Math.floor(totalMins / 60);
@@ -636,41 +683,32 @@ function saveNote() {
   saveData();
 }
 
-// ===== ABSENCE / VACATION =====
+// ===== ABSENCE =====
 let currentAbsenceDay = null;
 
 function markDay(type) {
   const today = getTodayStr();
   if (!userData.absences) userData.absences = {};
   const existing = userData.absences[today];
-
-  // لو موجود مسبقاً — ألغيه
   if (existing?.type === type) {
     showConfirm(
-      type === 'vacation' ? '🌴' : '❌',
-      'إلغاء التسجيل',
-      `هل تريد إلغاء تسجيل ${type === 'vacation' ? 'الإجازة' : 'الغياب'} لهذا اليوم؟`,
-      () => {
-        delete userData.absences[today];
-        saveData(); refreshAbsenceButtons(today);
-        showToast('✅ تم الإلغاء');
-      }
+      type==='vacation'?'🌴':'❌', 'إلغاء التسجيل',
+      `هل تريد إلغاء ${type==='vacation'?'الإجازة':'الغياب'}؟`,
+      () => { delete userData.absences[today]; saveData(); refreshAbsenceButtons(today); showToast('✅ تم الإلغاء'); }
     );
     return;
   }
-
   currentAbsenceType = type;
   currentAbsenceDay  = today;
-  document.getElementById('absence-modal-title').textContent = type === 'vacation' ? '🌴 تسجيل إجازة' : '❌ تسجيل غياب';
+  document.getElementById('absence-modal-title').textContent = type==='vacation'?'🌴 تسجيل إجازة':'❌ تسجيل غياب';
   document.getElementById('absence-reason').value = '';
   document.getElementById('absence-error').classList.add('hidden');
   document.getElementById('modal-absence').classList.remove('hidden');
 }
 
 function closeAbsenceModal(e) {
-  if (!e || e.target.classList.contains('modal-overlay') || e.type === 'click') {
+  if (!e || e.target.classList.contains('modal-overlay') || e.type==='click')
     document.getElementById('modal-absence').classList.add('hidden');
-  }
 }
 
 function saveAbsence() {
@@ -678,12 +716,12 @@ function saveAbsence() {
   if (!userData.absences) userData.absences = {};
   userData.absences[currentAbsenceDay] = {
     type: currentAbsenceType,
-    reason: reason || (currentAbsenceType === 'vacation' ? 'إجازة' : 'غياب')
+    reason: reason || (currentAbsenceType==='vacation'?'إجازة':'غياب')
   };
   saveData();
   document.getElementById('modal-absence').classList.add('hidden');
   refreshAbsenceButtons(currentAbsenceDay);
-  showToast(currentAbsenceType === 'vacation' ? '🌴 تم تسجيل الإجازة' : '❌ تم تسجيل الغياب');
+  showToast(currentAbsenceType==='vacation'?'🌴 تم تسجيل الإجازة':'❌ تم تسجيل الغياب');
 }
 
 function refreshAbsenceButtons(dateStr) {
@@ -692,8 +730,8 @@ function refreshAbsenceButtons(dateStr) {
   const vacBtn = document.querySelector('.absence-btn.vacation, .absence-btn.active-vacation');
   const absBtn = document.querySelector('.absence-btn.absent, .absence-btn.active-absent');
   if (!vacBtn || !absBtn) return;
-  vacBtn.className = 'absence-btn ' + (abs?.type === 'vacation' ? 'active-vacation' : 'vacation');
-  absBtn.className = 'absence-btn ' + (abs?.type === 'absent'   ? 'active-absent'   : 'absent');
+  vacBtn.className = 'absence-btn ' + (abs?.type==='vacation'?'active-vacation':'vacation');
+  absBtn.className = 'absence-btn ' + (abs?.type==='absent'?'active-absent':'absent');
 }
 
 // ===== CLEAR DATA =====
@@ -701,32 +739,168 @@ let clearStep = 0;
 
 function confirmClearData() {
   clearStep = 1;
-  showConfirm(
-    '⚠️',
-    'مسح جميع البيانات',
-    'سيتم حذف كل الحضور والمعاملات نهائياً',
-',هذا الإجراء لا يمكن التراجع عنه.',
+  showConfirm('⚠️', 'مسح جميع البيانات',
+    'سيتم حذف كل الحضور والمعاملات نهائياً.\nهذا الإجراء لا يمكن التراجع عنه.',
     () => {
       clearStep = 2;
       setTimeout(() => {
-        showConfirm(
-          '🔴',
-          'تأكيد نهائي',
-          'آخر فرصة — سيُمسح كل شيء بلا رجعة',
-',هل أنت متأكد تماماً؟',
+        showConfirm('🔴', 'تأكيد نهائي',
+          'آخر فرصة — سيُمسح كل شيء بلا رجعة.\nهل أنت متأكد تماماً؟',
           () => {
             userData.attendance   = {};
             userData.transactions = [];
-            readyForNewDay = false;
+            userData.notes        = {};
+            userData.absences     = {};
             saveData();
             clearStep = 0;
             showToast('🗑️ تم مسح البيانات — جاري الإعادة...');
-setTimeout(() => location.reload(), 800);
+            setTimeout(() => location.reload(), 800);
           }
         );
       }, 300);
     }
   );
+}
+
+// ===== CHART =====
+function renderChart(monthStr) {
+  const canvas = document.getElementById('hours-chart');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const y = parseInt(monthStr.split('-')[0]);
+  const m = parseInt(monthStr.split('-')[1]) - 1;
+  const daysInMonth = new Date(y, m+1, 0).getDate();
+  const hoursArr = [], colorsArr = [];
+
+  for (let d = 1; d <= daysInMonth; d++) {
+    const dateStr = `${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    const hrs = getTotalHours(dateStr);
+    const abs = userData.absences?.[dateStr];
+    hoursArr.push(parseFloat(hrs.toFixed(1)));
+    colorsArr.push(hrs>0 ? '#00C896' : abs?.type==='vacation' ? '#4a90e2' : abs?.type==='absent' ? '#ff5c6a' : '#2a3444');
+  }
+
+  const W = canvas.parentElement.clientWidth - 32;
+  const H = 148;
+  canvas.width = W; canvas.height = H;
+  ctx.clearRect(0, 0, W, H);
+  const maxH = Math.max(...hoursArr, 1);
+  const barW = Math.max(2, Math.floor(W/daysInMonth)-2);
+  const gap  = Math.floor(W/daysInMonth);
+
+  ctx.strokeStyle='#2a3444'; ctx.lineWidth=0.5;
+  for (let i=0; i<=4; i++) {
+    const y2=H-20-(i/4)*(H-28);
+    ctx.beginPath(); ctx.moveTo(0,y2); ctx.lineTo(W,y2); ctx.stroke();
+  }
+  hoursArr.forEach((h,i) => {
+    const barH = h>0 ? Math.max(3,(h/maxH)*(H-28)) : 2;
+    const x = i*gap+(gap-barW)/2;
+    const y2 = H-20-barH;
+    ctx.fillStyle=colorsArr[i];
+    ctx.beginPath();
+    ctx.roundRect ? ctx.roundRect(x,y2,barW,barH,2) : ctx.rect(x,y2,barW,barH);
+    ctx.fill();
+    if (i===0||(i+1)%5===0) {
+      ctx.fillStyle='#4a5568'; ctx.font='9px Tajawal,sans-serif'; ctx.textAlign='center';
+      ctx.fillText(i+1, x+barW/2, H-5);
+    }
+  });
+}
+
+// ===== CALENDAR =====
+function renderCalendar(monthStr) {
+  const el = document.getElementById('month-calendar');
+  if (!el) return;
+  const y = parseInt(monthStr.split('-')[0]);
+  const m = parseInt(monthStr.split('-')[1]) - 1;
+  const firstDay    = new Date(y,m,1).getDay();
+  const daysInMonth = new Date(y,m+1,0).getDate();
+  const todayStr    = getTodayStr();
+  const dayNames    = ['أح','اث','ثل','أر','خم','جم','سب'];
+  let html = '<div class="cal-grid">';
+  dayNames.forEach(d => { html += `<div class="cal-day-name">${d}</div>`; });
+  for (let i=0; i<firstDay; i++) html += '<div class="cal-day empty"></div>';
+  for (let d=1; d<=daysInMonth; d++) {
+    const dateStr = `${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    const hrs = getTotalHours(dateStr);
+    const abs = userData.absences?.[dateStr];
+    let cls = 'cal-day';
+    if (hrs > 0)                    cls += ' present';
+    else if (abs?.type==='vacation') cls += ' vacation';
+    else if (abs?.type==='absent')   cls += ' absent';
+    if (dateStr === todayStr)        cls += ' today';
+    html += `<div class="${cls}">${d}</div>`;
+  }
+  html += `</div><div class="cal-legend">
+    <div class="cal-legend-item"><div class="cal-dot present"></div>حضور</div>
+    <div class="cal-legend-item"><div class="cal-dot absent"></div>غياب</div>
+    <div class="cal-legend-item"><div class="cal-dot vacation"></div>إجازة</div>
+  </div>`;
+  el.innerHTML = html;
+}
+
+// ===== SHARE =====
+function shareReport() {
+  const y=reportDate.getFullYear(), m=reportDate.getMonth();
+  const ms=`${y}-${String(m+1).padStart(2,'0')}`;
+  const MN=['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
+  const label=`${MN[m]} ${y}`;
+  const s=userData.settings;
+  let totalE=0,totalD=0,days=0;
+  Object.keys(userData.attendance).filter(d=>d.startsWith(ms)).forEach(dateStr=>{
+    const hrs=getTotalHours(dateStr);
+    if(hrs<=0) return;
+    const earned=s.salaryType==='hourly'?hrs*(s.hourlyRate||0):(s.dailyRate||0);
+    const dayDed=userData.transactions.filter(t=>t.date===dateStr&&t.amount>0).reduce((s,t)=>s+t.amount,0);
+    totalE+=earned; totalD+=dayDed; days++;
+  });
+  const text=`📊 تقرير Waqti — ${label}\n👤 ${userData.name||currentUser}\n\n✅ أيام العمل: ${days} يوم\n💰 إجمالي الراتب: ${totalE.toFixed(1)} د\n📤 الخصومات: ${totalD.toFixed(1)} د\n💵 الصافي المستحق: ${(totalE-totalD).toFixed(1)} د\n\n— Waqti App`;
+  if (navigator.share) { navigator.share({title:`تقرير ${label}`,text}).catch(()=>{}); }
+  else { navigator.clipboard?.writeText(text).then(()=>showToast('📋 تم نسخ التقرير')); }
+}
+
+// ===== BACKUP =====
+function exportBackup() {
+  const backup={user:currentUser,data:userData,exportedAt:new Date().toISOString()};
+  const blob=new Blob([JSON.stringify(backup,null,2)],{type:'application/json'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url; a.download=`waqti-backup-${currentUser}-${getTodayStr()}.json`; a.click();
+  URL.revokeObjectURL(url);
+  showToast('💾 تم تصدير النسخة الاحتياطية');
+}
+
+function importBackup(event) {
+  const file=event.target.files[0]; if(!file) return;
+  const reader=new FileReader();
+  reader.onload=(e)=>{
+    try {
+      const backup=JSON.parse(e.target.result);
+      if(!backup.data){showToast('⚠️ ملف غير صحيح');return;}
+      showConfirm('💾','استيراد النسخة الاحتياطية','سيتم استبدال بياناتك الحالية. هل تريد المتابعة؟',()=>{
+        userData=backup.data; saveData(); navigateTo('home'); showToast('✅ تم استيراد البيانات');
+      });
+    } catch { showToast('⚠️ فشل قراءة الملف'); }
+  };
+  reader.readAsText(file);
+  event.target.value='';
+}
+
+// ===== THEME =====
+function initTheme() {
+  const saved=localStorage.getItem('wt_theme');
+  applyTheme(saved==='light'?'light':'dark');
+}
+function toggleTheme() { applyTheme(document.body.classList.contains('light')?'dark':'light'); }
+function applyTheme(theme) {
+  const isLight=theme==='light';
+  document.body.classList.toggle('light',isLight);
+  localStorage.setItem('wt_theme',theme);
+  const btn=document.getElementById('theme-toggle-btn');
+  const label=document.getElementById('theme-label');
+  if(btn) btn.classList.toggle('light',isLight);
+  if(label) label.textContent=isLight?'☀️ فاتح':'🌙 داكن';
 }
 
 // ===== HELPERS =====
@@ -741,12 +915,12 @@ function getCurrentTimeStr() {
   return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
 }
 function calcHours(t1,t2) {
+  if(!t1||!t2) return 0;
   const[h1,m1]=t1.split(':').map(Number);
   const[h2,m2]=t2.split(':').map(Number);
   return Math.max(0,(h2*60+m2-h1*60-m1)/60);
 }
 function calcHoursUntilNow(t1){ return calcHours(t1,getCurrentTimeStr()); }
-
 function formatDateShort(dateStr) {
   const[y,m,d]=dateStr.split('-');
   const MN=['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
@@ -767,218 +941,4 @@ function showToast(msg) {
   t.textContent=msg; t.classList.remove('hidden');
   clearTimeout(showToast._t);
   showToast._t=setTimeout(()=>t.classList.add('hidden'),2500);
-}
-
-// ===== CHART =====
-let chartInstance = null;
-
-function renderChart(monthStr) {
-  const canvas = document.getElementById('hours-chart');
-  if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  const s   = userData.settings;
-  const days = [];
-  const hours = [];
-  const colors = [];
-
-  const y = parseInt(monthStr.split('-')[0]);
-  const m = parseInt(monthStr.split('-')[1]) - 1;
-  const daysInMonth = new Date(y, m + 1, 0).getDate();
-
-  for (let d = 1; d <= daysInMonth; d++) {
-    const dateStr = `${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
-    const att = userData.attendance[dateStr];
-    const abs = userData.absences?.[dateStr];
-    days.push(d);
-    if (att?.in && att?.out) {
-      const h = calcHours(att.in, att.out);
-      hours.push(parseFloat(h.toFixed(1)));
-      colors.push('#00C896');
-    } else if (abs?.type === 'vacation') {
-      hours.push(0); colors.push('#4a90e2');
-    } else if (abs?.type === 'absent') {
-      hours.push(0); colors.push('#ff5c6a');
-    } else {
-      hours.push(0); colors.push('#2a3444');
-    }
-  }
-
-  if (chartInstance) { chartInstance.destroy(); chartInstance = null; }
-
-  // رسم يدوي بسيط بدون مكتبات
-  const W = canvas.parentElement.clientWidth - 32;
-  const H = 148;
-  canvas.width  = W;
-  canvas.height = H;
-  ctx.clearRect(0, 0, W, H);
-
-  const maxH   = Math.max(...hours, 1);
-  const barW   = Math.max(2, Math.floor(W / daysInMonth) - 2);
-  const gap    = Math.floor(W / daysInMonth);
-
-  // grid lines
-  ctx.strokeStyle = '#2a3444';
-  ctx.lineWidth   = 0.5;
-  for (let i = 0; i <= 4; i++) {
-    const y2 = H - 20 - (i / 4) * (H - 28);
-    ctx.beginPath(); ctx.moveTo(0, y2); ctx.lineTo(W, y2); ctx.stroke();
-  }
-
-  // bars
-  days.forEach((d, i) => {
-    const barH  = hours[i] > 0 ? Math.max(3, (hours[i] / maxH) * (H - 28)) : 2;
-    const x     = i * gap + (gap - barW) / 2;
-    const y2    = H - 20 - barH;
-    ctx.fillStyle = colors[i];
-    ctx.beginPath();
-    ctx.roundRect ? ctx.roundRect(x, y2, barW, barH, 2) : ctx.rect(x, y2, barW, barH);
-    ctx.fill();
-
-    // day number (every 5 days)
-    if (d === 1 || d % 5 === 0) {
-      ctx.fillStyle = '#4a5568';
-      ctx.font = '9px Tajawal, sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText(d, x + barW / 2, H - 5);
-    }
-  });
-}
-
-// ===== CALENDAR =====
-function renderCalendar(monthStr) {
-  const el = document.getElementById('month-calendar');
-  if (!el) return;
-
-  const y = parseInt(monthStr.split('-')[0]);
-  const m = parseInt(monthStr.split('-')[1]) - 1;
-  const firstDay    = new Date(y, m, 1).getDay(); // 0=Sun
-  const daysInMonth = new Date(y, m + 1, 0).getDate();
-  const todayStr    = getTodayStr();
-
-  // أيام الأسبوع بالعربي (أحد → سبت)
-  const dayNames = ['أح','اث','ثل','أر','خم','جم','سب'];
-
-  let html = '<div class="cal-grid">';
-  dayNames.forEach(d => { html += `<div class="cal-day-name">${d}</div>`; });
-
-  // فراغات قبل اليوم الأول
-  for (let i = 0; i < firstDay; i++) html += '<div class="cal-day empty"></div>';
-
-  for (let d = 1; d <= daysInMonth; d++) {
-    const dateStr = `${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
-    const att = userData.attendance[dateStr];
-    const abs = userData.absences?.[dateStr];
-    const isToday = dateStr === todayStr;
-
-    let cls = 'cal-day';
-    if (att?.in && att?.out) cls += ' present';
-    else if (abs?.type === 'vacation') cls += ' vacation';
-    else if (abs?.type === 'absent')   cls += ' absent';
-    if (isToday) cls += ' today';
-
-    html += `<div class="${cls}">${d}</div>`;
-  }
-
-  html += '</div>';
-  html += `<div class="cal-legend">
-    <div class="cal-legend-item"><div class="cal-dot present"></div>حضور</div>
-    <div class="cal-legend-item"><div class="cal-dot absent"></div>غياب</div>
-    <div class="cal-legend-item"><div class="cal-dot vacation"></div>إجازة</div>
-  </div>`;
-
-  el.innerHTML = html;
-}
-
-// ===== SHARE REPORT =====
-function shareReport() {
-  const y = reportDate.getFullYear(), m = reportDate.getMonth();
-  const ms = `${y}-${String(m+1).padStart(2,'0')}`;
-  const MN = ['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
-  const label = `${MN[m]} ${y}`;
-  const s = userData.settings;
-
-  let totalE = 0, totalD = 0, days = 0;
-  Object.keys(userData.attendance).filter(d => d.startsWith(ms)).forEach(dateStr => {
-    const att = userData.attendance[dateStr];
-    if (!att?.in || !att?.out) return;
-    const hrs    = calcHours(att.in, att.out);
-    const earned = s.salaryType === 'hourly' ? hrs * (s.hourlyRate||0) : (s.dailyRate||0);
-    const dayDed = userData.transactions.filter(t => t.date === dateStr && t.amount > 0).reduce((s,t) => s+t.amount, 0);
-    totalE += earned; totalD += dayDed; days++;
-  });
-
-  const text =
-`📊 تقرير Waqti — ${label}
-👤 ${userData.name || currentUser}
-
-✅ أيام العمل: ${days} يوم
-💰 إجمالي الراتب: ${totalE.toFixed(1)} د
-📤 الخصومات: ${totalD.toFixed(1)} د
-💵 الصافي المستحق: ${(totalE - totalD).toFixed(1)} د
-
-— Waqti App`;
-
-  if (navigator.share) {
-    navigator.share({ title: `تقرير ${label}`, text }).catch(() => {});
-  } else {
-    navigator.clipboard?.writeText(text).then(() => showToast('📋 تم نسخ التقرير'));
-  }
-}
-
-// ===== BACKUP =====
-function exportBackup() {
-  const backup = { user: currentUser, data: userData, exportedAt: new Date().toISOString() };
-  const blob   = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
-  const url    = URL.createObjectURL(blob);
-  const a      = document.createElement('a');
-  a.href       = url;
-  a.download   = `waqti-backup-${currentUser}-${getTodayStr()}.json`;
-  a.click();
-  URL.revokeObjectURL(url);
-  showToast('💾 تم تصدير النسخة الاحتياطية');
-}
-
-function importBackup(event) {
-  const file = event.target.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    try {
-      const backup = JSON.parse(e.target.result);
-      if (!backup.data) { showToast('⚠️ ملف غير صحيح'); return; }
-      showConfirm('💾', 'استيراد النسخة الاحتياطية',
-        'سيتم استبدال بياناتك الحالية بالنسخة المستوردة. هل تريد المتابعة؟',
-        () => {
-          userData = backup.data;
-          saveData();
-          navigateTo('home');
-          showToast('✅ تم استيراد البيانات بنجاح');
-        }
-      );
-    } catch { showToast('⚠️ فشل قراءة الملف'); }
-  };
-  reader.readAsText(file);
-  event.target.value = '';
-}
-
-// ===== THEME =====
-function initTheme() {
-  const saved = localStorage.getItem('wt_theme');
-  if (saved === 'light') applyTheme('light');
-  else applyTheme('dark');
-}
-
-function toggleTheme() {
-  const isLight = document.body.classList.contains('light');
-  applyTheme(isLight ? 'dark' : 'light');
-}
-
-function applyTheme(theme) {
-  const isLight = theme === 'light';
-  document.body.classList.toggle('light', isLight);
-  localStorage.setItem('wt_theme', theme);
-  const btn   = document.getElementById('theme-toggle-btn');
-  const label = document.getElementById('theme-label');
-  if (btn)   btn.classList.toggle('light', isLight);
-  if (label) label.textContent = isLight ? '☀️ فاتح' : '🌙 داكن';
 }
